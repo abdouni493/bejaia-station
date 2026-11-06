@@ -1,24 +1,17 @@
 /**
- * ─── DATA CLIENT (MODE DÉMO — AUCUNE BASE DE DONNÉES) ─────────────────────────
- * L'application ne se connecte plus à Supabase : `supabase` est un client LOCAL
- * (`mockSupabase.ts`) qui imite l'API de supabase-js sur une base en mémoire,
- * pré-remplie avec le jeu de données constant de `demoData.ts`. Toutes les
- * interfaces fonctionnent donc hors ligne, pour les tests.
- *
- * Compte administrateur de démonstration : admin / demo1234
- * (bouton « Connexion admin démo » sur la page de connexion).
+ * ─── DATA CLIENT — Supabase ────────────────────────────────────────────────────
+ * Schema: supabase/full_schema.sql (run once in Supabase → SQL Editor).
  * ──────────────────────────────────────────────────────────────────────────────
  */
-import { createMockClient, resetDemoDatabase } from './mockSupabase';
-import { DEMO_ADMIN, DEMO_ACCOUNTS } from './demoData';
+import { createClient } from '@supabase/supabase-js';
 
-export { resetDemoDatabase, DEMO_ADMIN, DEMO_ACCOUNTS };
+export const SUPABASE_URL =
+  (import.meta as any).env?.VITE_SUPABASE_URL || 'https://oiuywncgoqepsmevxhqb.supabase.co';
+export const SUPABASE_ANON_KEY =
+  (import.meta as any).env?.VITE_SUPABASE_ANON_KEY ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdXl3bmNnb3FlcHNtZXZ4aHFiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM5ODMyNjMsImV4cCI6MjEwOTU1OTI2M30.iXzCzAO37uYKqzooxFLHME1VkC4ryFQxz3k5S24qjPo';
 
-/** Conservés pour compatibilité : aucune URL ni clé n'est plus utilisée. */
-export const SUPABASE_URL = 'demo://local';
-export const SUPABASE_ANON_KEY = 'demo';
-
-export const IS_DEMO = true;
+export const IS_DEMO = false;
 
 /** localStorage key holding the Supabase session (read synchronously at boot). */
 export const AUTH_STORAGE_KEY = 'station-auth-token';
@@ -51,8 +44,13 @@ export type BackendStatus = 'ok' | 'database' | 'offline';
 
 /** Tells apart « no Internet » from « Supabase does not answer ». */
 export async function probeBackend(): Promise<BackendStatus> {
-  // Mode démo : la « base » est locale, elle répond toujours.
-  return 'ok';
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'offline';
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/health`, { headers: { apikey: SUPABASE_ANON_KEY } });
+    return res.ok ? 'ok' : 'database';
+  } catch {
+    return 'offline';
+  }
 }
 
 /** Message prêt à afficher pour chaque état — même vocabulaire partout. */
@@ -61,7 +59,9 @@ export const BACKEND_STATUS_MESSAGE: Record<Exclude<BackendStatus, 'ok'>, string
   offline: "Impossible de joindre le serveur. Vérifiez votre connexion Internet.",
 };
 
-export const supabase: any = createMockClient();
+export const supabase: any = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { storageKey: AUTH_STORAGE_KEY, persistSession: true, autoRefreshToken: true },
+});
 
 // ─── Realtime health ────────────────────────────────────────────────────────────
 /**
@@ -130,18 +130,14 @@ export function getPublicUrl(bucket: string, path: string): string {
 }
 
 
-/**
- * Mode démo : le fichier n'est envoyé nulle part, il est gardé dans le
- * navigateur sous forme de data-URL (affichable comme une URL publique).
- */
-export async function uploadFile(_bucket: string, _path: string, file: File): Promise<string | null> {
+/** Uploads a file to a storage bucket and returns its public URL. */
+export async function uploadFile(bucket: string, path: string, file: File | Blob): Promise<string | null> {
   try {
-    return await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(file);
+    const { error } = await supabase.storage.from(bucket).upload(path, file, {
+      upsert: true, contentType: (file as File).type || undefined,
     });
+    if (error) { console.warn('[uploadFile]', error.message); return null; }
+    return getPublicUrl(bucket, path);
   } catch (e) {
     console.warn('[uploadFile] failed', e);
     return null;
@@ -150,14 +146,25 @@ export async function uploadFile(_bucket: string, _path: string, file: File): Pr
 
 /** Converts a base64 / data-URL string to bytes and uploads it; returns public URL. */
 export async function uploadBase64(
-  _bucket: string,
-  _path: string,
+  bucket: string,
+  path: string,
   base64: string,
   mimeType = 'image/jpeg'
 ): Promise<string | null> {
   if (!base64) return null;
-  if (base64.startsWith('http') || base64.startsWith('blob:') || base64.startsWith('data:')) return base64;
-  return `data:${mimeType};base64,${base64}`;
+  if (base64.startsWith('http') || base64.startsWith('blob:')) return base64;
+  let raw = base64;
+  const m = /^data:([^;]+);base64,(.*)$/.exec(base64);
+  if (m) { mimeType = m[1]; raw = m[2]; }
+  try {
+    const bin = atob(raw);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return await uploadFile(bucket, path, new Blob([bytes], { type: mimeType }));
+  } catch (e) {
+    console.warn('[uploadBase64] failed', e);
+    return null;
+  }
 }
 
 // ─── Auth helpers (public API) ──────────────────────────────────────────────────
@@ -243,11 +250,6 @@ export async function adminExists(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** Connexion directe au compte administrateur de démonstration. */
-export function signInDemoAdmin() {
-  return signIn(DEMO_ADMIN.username, DEMO_ADMIN.password);
 }
 
 export async function signOut() {
