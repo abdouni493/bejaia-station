@@ -416,6 +416,31 @@ export async function loadBizStoreSnapshot(): Promise<BizStoreSnapshot | null> {
   }
 }
 
+/**
+ * Lecture du blob qui distingue « la ligne n'existe pas encore » (`ok`, snapshot
+ * null) de « la lecture a échoué » (`ok: false`). Sans cette distinction, un
+ * poste qui démarre hors ligne prendrait l'échec pour une base vide — et
+ * pourrait écrire un état vide par-dessus les vraies données.
+ */
+export async function loadBizStoreChecked(): Promise<
+  { ok: true; snapshot: BizStoreSnapshot | null; error?: undefined } | { ok: false; snapshot?: undefined; error: string }
+> {
+  try {
+    const { data, error } = await supabase
+      .from('biz_store').select('state, rev').eq('id', BIZ_STORE_ID).maybeSingle();
+    if (!error) {
+      return { ok: true, snapshot: data ? { state: (data as any).state ?? null, rev: (data as any).rev ?? null } : null };
+    }
+    // Colonne `rev` absente (migration non passée) → relecture sans elle.
+    const fallback = await supabase
+      .from('biz_store').select('state').eq('id', BIZ_STORE_ID).maybeSingle();
+    if (fallback.error) return { ok: false, error: fallback.error.message || 'Lecture impossible' };
+    return { ok: true, snapshot: fallback.data ? { state: (fallback.data as any).state ?? null, rev: null } : null };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'Serveur injoignable' };
+  }
+}
+
 export async function loadBizStore(): Promise<any | null> {
   return (await loadBizStoreSnapshot())?.state ?? null;
 }

@@ -80,6 +80,7 @@ create table if not exists public.station_settings (
   magasin1_name           text,               -- nom du premier magasin (partie 'lavage')
   magasin2_name           text,               -- nom du second magasin (partie 'magasin2')
   magasin2_enabled        boolean not null default false,
+  zakat_config            jsonb,              -- réglages de la zakât (Rapports généraux)
   created_at              timestamptz default now()
 );
 
@@ -2248,6 +2249,7 @@ on conflict (id) do nothing;
 alter table public.station_settings add column if not exists magasin1_name    text;
 alter table public.station_settings add column if not exists magasin2_name    text;
 alter table public.station_settings add column if not exists magasin2_enabled boolean not null default false;
+alter table public.station_settings add column if not exists zakat_config     jsonb;
 
 -- 1b. La clé 'magasin2' autorisée partout où une partie est nommée ------------------
 --     Les anciennes contraintes CHECK (nommées automatiquement) sont retirées, quel

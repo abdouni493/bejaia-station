@@ -24,7 +24,7 @@ import {
   computeCarburantAnalytics, computeModuleAnalytics, consolidateAnalytics,
   pickGranularity, Granularity,
 } from '@/src/lib/bizAnalytics';
-import { ZakatConfig, ZakatInputs, loadZakatConfig } from '@/src/lib/zakat';
+import { ZakatConfig, ZakatInputs, loadZakatConfig, fetchZakatConfig } from '@/src/lib/zakat';
 import ReportView from '@/src/components/biz/ReportView';
 import WorkforceView from '@/src/components/biz/WorkforceView';
 import TreasuryView from '@/src/components/biz/TreasuryView';
@@ -134,8 +134,13 @@ export default function GeneralReports() {
   const [showCaisse, setShowCaisse] = useState(false);
   /** Découpage du temps des analyses — automatique tant qu'on n'y touche pas. */
   const [grain, setGrain] = useState<Granularity | undefined>(undefined);
-  /** Réglages de zakât — conservés sur ce poste d'une session à l'autre. */
+  /** Réglages de zakât — enregistrés dans Supabase (station_settings). */
   const [zakatConfig, setZakatConfig] = useState<ZakatConfig>(() => loadZakatConfig());
+  useEffect(() => {
+    let alive = true;
+    fetchZakatConfig().then(cfg => { if (alive) setZakatConfig(cfg); });
+    return () => { alive = false; };
+  }, []);
 
   const reports: Record<'carburant' | ModuleKey, PartReport> = useMemo(() => ({
     carburant: computeCarburantReport(app, range.from, range.to),

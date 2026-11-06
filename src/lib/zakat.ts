@@ -34,11 +34,14 @@
  * Tout est paramétrable : taux, mode de nisâb et prix du métal, valorisation du
  * stock, composants inclus ou exclus, part douteuse des créances, plus des
  * lignes libres (or personnel, avances, charges à payer…). Les réglages sont
- * conservés dans le navigateur.
+ * enregistrés dans Supabase (station_settings.zakat_config).
  * ──────────────────────────────────────────────────────────────────────────────
  */
 
+import { supabase } from './supabase';
+
 // ─── Réglages ────────────────────────────────────────────────────────────────
+
 export type NisabMode = 'gold' | 'silver' | 'manual';
 export type YearType = 'lunar' | 'solar';
 export type StockBasis = 'sale' | 'purchase';
@@ -124,26 +127,53 @@ export const DEFAULT_ZAKAT_CONFIG: ZakatConfig = {
   customLines: [],
 };
 
-const STORAGE_KEY = 'stationpro_zakat_v1';
+/**
+ * Les réglages sont enregistrés dans Supabase (`station_settings.zakat_config`),
+ * plus dans le navigateur : ils sont les mêmes sur tous les postes.
+ */
+export function normalizeZakatConfig(saved: any): ZakatConfig {
+  if (!saved || typeof saved !== 'object') return { ...DEFAULT_ZAKAT_CONFIG };
+  return {
+    ...DEFAULT_ZAKAT_CONFIG,
+    ...saved,
+    include: { ...DEFAULT_ZAKAT_CONFIG.include, ...(saved?.include || {}) },
+    customLines: Array.isArray(saved?.customLines) ? saved.customLines : [],
+  };
+}
 
+/** Valeur de départ, avant la réponse de Supabase. */
 export function loadZakatConfig(): ZakatConfig {
+  return { ...DEFAULT_ZAKAT_CONFIG };
+}
+
+/** Réglages enregistrés dans Supabase (valeurs par défaut s'il n'y en a pas). */
+export async function fetchZakatConfig(): Promise<ZakatConfig> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_ZAKAT_CONFIG };
-    const saved = JSON.parse(raw);
-    return {
-      ...DEFAULT_ZAKAT_CONFIG,
-      ...saved,
-      include: { ...DEFAULT_ZAKAT_CONFIG.include, ...(saved?.include || {}) },
-      customLines: Array.isArray(saved?.customLines) ? saved.customLines : [],
-    };
+    const { data } = await supabase
+      .from('station_settings').select('zakat_config').limit(1).maybeSingle();
+    return normalizeZakatConfig((data as any)?.zakat_config);
   } catch {
     return { ...DEFAULT_ZAKAT_CONFIG };
   }
 }
 
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Enregistre les réglages dans Supabase (regroupe les saisies rapides). */
 export function saveZakatConfig(cfg: ZakatConfig): void {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg)); } catch { /* quota */ }
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    saveTimer = null;
+    try {
+      const existing = await supabase.from('station_settings').select('id').limit(1).maybeSingle();
+      const id = (existing.data as any)?.id || 'settings-1';
+      const { error } = await supabase
+        .from('station_settings').upsert({ id, zakat_config: cfg }, { onConflict: 'id' });
+      if (error) console.error('[zakat] Enregistrement impossible :', error.message);
+    } catch (e: any) {
+      console.error('[zakat] Enregistrement impossible :', e?.message || e);
+    }
+  }, 800);
 }
 
 // ─── Entrées prises dans l'application ───────────────────────────────────────

@@ -33,16 +33,17 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { BizState, ModuleKey, ModuleState, BizCollection, BizSession, BizProduct, MODULE_KEYS, isModuleKey } from '../lib/bizConfig';
 import { emptyBizState, EMPTY_MODULE } from '../lib/bizSeed';
-import { loadBizStoreSnapshot, peekBizStoreRev, saveBizStore, subscribeTable, BizStoreSnapshot } from '../lib/supabase';
+import { loadBizStoreSnapshot, loadBizStoreChecked, peekBizStoreRev, saveBizStore, subscribeTable, BizStoreSnapshot } from '../lib/supabase';
 import { loadBizSessions } from '../lib/bizSessions';
 import {
   loadBizProducts, saveBizProducts, deleteBizProducts, mergeRemoteProducts,
   productsMissingFromRemote, ProductRowInput,
 } from '../lib/bizProducts';
 import { mergeBizState, stampItem, nowIso, SyncModuleState } from '../lib/bizSync';
-import { purgeSeedRows, relinkOrphanRefs } from '../lib/bizSeedPurge';
+import { purgeSeedRows, relinkOrphanRefs, containsSeedIds, SEED_ID } from '../lib/bizSeedPurge';
 
-const STORAGE_KEY = 'stationpro_biz_demo_v1';
+/** Nouvelle lecture du serveur quand la première a échoué (hors ligne…). */
+const HYDRATE_RETRY_MS = 5_000;
 
 /**
  * Délai avant l'envoi d'une modification (regroupe les rafales de saisie).
@@ -50,10 +51,9 @@ const STORAGE_KEY = 'stationpro_biz_demo_v1';
  * Porté de 600 ms à 2,5 s : chaque envoi écrit le blob COMPLET (~560 Ko), donc
  * une vente encaissée toutes les quelques secondes déclenchait autant d'envois
  * intégraux — c'est une des causes de la saturation de la base du 2026-08-10.
- * Rien n'est risqué par l'attente : la copie locale est écrite de façon
- * synchrone dans le navigateur à chaque modification, les flux critiques
- * appellent `flush()` explicitement, et la fermeture de la page envoie ce qui
- * reste (visibilitychange / pagehide).
+ * Les flux critiques appellent `flush()` explicitement, la fermeture de la
+ * page envoie ce qui reste (visibilitychange / pagehide) et le navigateur
+ * demande confirmation avant de quitter tant qu'un envoi est en attente.
  */
 const SAVE_DEBOUNCE_MS = 2_500;
 /** Nombre de refusions autorisées quand le serveur signale un conflit. */
@@ -308,14 +308,12 @@ function migrate(raw: any): BizState | null {
   return isValidState(state) ? (state as BizState) : null;
 }
 
+/**
+ * État de départ : VIDE. Aucune copie du navigateur n'est relue — Supabase est
+ * la seule source des données. (L'ancienne copie locale portait le jeu de
+ * démonstration et le renvoyait vers le serveur à chaque démarrage.)
+ */
 function loadInitial(): BizState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const migrated = migrate(JSON.parse(raw));
-      if (migrated) return migrated;
-    }
-  } catch { /* ignore corrupt storage */ }
   return emptyBizState();
 }
 
@@ -416,8 +414,14 @@ export function BizProvider({ children }: { children: React.ReactNode }) {
   const pushNow = useCallback(async (): Promise<SaveOutcome> => {
     // Version du serveur à fusionner avant d'écrire — connue sans lecture
     // supplémentaire quand elle vient d'un refus de révision.
-    let remoteSnapshot: BizStoreSnapshot | null =
-      revRef.current === null ? await loadBizStoreSnapshot() : null;
+    let remoteSnapshot: BizStoreSnapshot | null = null;
+    if (revRef.current === null) {
+      // Sans révision connue, l'écriture serait inconditionnelle : on ne la
+      // tente que si le serveur a pu être lu (sinon on écraserait ses données).
+      const read = await loadBizStoreChecked();
+      if (!read.ok) return { ok: false, error: read.error };
+      remoteSnapshot = read.snapshot;
+    }
 
     for (let attempt = 0; attempt <= MAX_CONFLICT_RETRIES; attempt++) {
       const remote = remoteSnapshot?.state ? migrate(remoteSnapshot.state) : null;
@@ -734,17 +738,42 @@ export function BizProvider({ children }: { children: React.ReactNode }) {
     if (sessionsRef.current) dispatch({ type: 'SET_SESSIONS', sessions: sessionsRef.current });
   }, []);
 
-  // Premier chargement — la copie du serveur est FUSIONNÉE dans la copie locale,
-  // jamais substituée : ce qui a été saisi ici et n'est pas encore parti (produit
-  // créé juste avant un rafraîchissement, poste hors ligne) survit et repart.
+  // Premier chargement — l'état part VIDE et se remplit de la copie Supabase.
+  // (Une saisie faite avant la réponse est fusionnée, jamais écrasée.)
   useEffect(() => {
     let cancelled = false;
     (async () => {
       // Le blob et le catalogue sont lus EN MÊME TEMPS : ce sont deux sources
       // indépendantes, et l'ouverture ne doit pas coûter deux allers-retours.
-      const [snapshot, catalogue] = await Promise.all([loadBizStoreSnapshot(), loadBizProducts()]);
+      let read = await loadBizStoreChecked();
+      // Lecture en échec : on ne conclut RIEN (surtout pas « base vide »), on
+      // réessaie jusqu'à obtenir la réponse du serveur.
+      while (!read.ok) {
+        if (cancelled) return;
+        console.warn('[biz] Lecture Supabase impossible, nouvel essai :', read.error);
+        applySync({ error: read.error });
+        await new Promise(r => setTimeout(r, HYDRATE_RETRY_MS));
+        if (cancelled) return;
+        read = await loadBizStoreChecked();
+      }
+      applySync({ error: null });
+      const snapshot = read.snapshot;
+      const catalogue = await loadBizProducts();
       if (cancelled) return;
       revRef.current = snapshot?.rev ?? null;
+
+      // Fiches de démonstration déjà poussées dans la table des produits par
+      // l'ancienne copie locale : elles sont retirées de la base.
+      if (catalogue.status === 'ok') {
+        const demoIds: string[] = [];
+        for (const key of MODULE_KEYS) {
+          catalogue.products[key] = catalogue.products[key].filter(p => {
+            if (p?.id && SEED_ID.test(p.id)) { demoIds.push(p.id); return false; }
+            return true;
+          });
+        }
+        if (demoIds.length) void deleteBizProducts(demoIds);
+      }
       const remote = snapshot?.state ? migrate(snapshot.state) : null;
 
       let merged = remote ? mergeBizState(stateRef.current, remote) : stateRef.current;
@@ -768,7 +797,11 @@ export function BizProvider({ children }: { children: React.ReactNode }) {
         // (ordre différent, clé en plus) elle échoue et l'envoi a lieu —
         // c'est-à-dire l'ancien comportement, jamais moins sûr.
         try {
-          if (JSON.stringify(merged) === JSON.stringify(remote)) lastSavedRef.current = merged;
+          // …sauf si la copie du serveur portait encore des lignes de
+          // démonstration : leur retrait doit alors être enregistré.
+          if (JSON.stringify(merged) === JSON.stringify(remote) && !containsSeedIds(snapshot?.state)) {
+            lastSavedRef.current = merged;
+          }
         } catch { /* état non sérialisable : on renvoie, comme avant */ }
       }
 
@@ -861,10 +894,18 @@ export function BizProvider({ children }: { children: React.ReactNode }) {
     return () => { unsubMeta(); unsubLegacy(); window.removeEventListener('focus', onFocus); };
   }, [pull]);
 
-  // Fermeture / rafraîchissement de la page : dernière chance d'envoyer. Même si
-  // la requête n'a pas le temps de partir, la copie locale est complète et sera
-  // fusionnée au prochain démarrage — rien n'est perdu.
+  // Fermeture / rafraîchissement de la page : dernière chance d'envoyer. Aucune
+  // copie n'est gardée dans le navigateur (Supabase est la seule source), donc
+  // le départ est retenu tant qu'une modification n'est pas confirmée.
   useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!hydratedRef.current) return;
+      if (stateRef.current === lastSavedRef.current && !productQueue.current.size) return;
+      void runSaveRef.current();
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
     const onHide = () => {
       if (document.visibilityState !== 'hidden') return;
       if (productQueue.current.size) void runProductPushRef.current();
@@ -879,14 +920,13 @@ export function BizProvider({ children }: { children: React.ReactNode }) {
     return () => {
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('beforeunload', onBeforeUnload);
     };
   }, []);
 
-  // Toute modification est d'abord écrite dans le navigateur — de façon
-  // synchrone — puis programmée pour le serveur.
+  // Toute modification est programmée pour Supabase.
   useEffect(() => {
     stateRef.current = state;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch { /* quota */ }
 
     if (!hydratedRef.current) return;
     if (state === lastSavedRef.current) return;   // rien de neuf à envoyer
