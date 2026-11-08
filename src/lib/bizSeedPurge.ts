@@ -25,7 +25,18 @@ import { MERGE_COLLECTIONS, nowIso, stampItem } from './bizSync';
  * — dans Cafétéria et Lavage, où elles s'affichent encore.
  */
 export const SEED_ID =
-  /^(?:cafeteria|lavage|restaurant|magasin)-(?:acp|cat|cli|cmp|csh|dst|exp|fic|mrq|prod|prd|pur|rep|role|sale|srv|sup|wrk)-\d+/;
+  /^(?:(?:cafeteria|lavage|restaurant|magasin)-(?:acp|cat|cli|cmp|csh|dst|exp|fic|mrq|prod|prd|pur|rep|role|sale|srv|sup|wrk)-\d+|[a-z0-9]+-demo-)/;
+// Le second motif couvre le dernier jeu de démonstration (mode hors ligne) :
+// `caf-demo-p1`, `lav-demo-cli-1`, `cw-demo-car-2`, `cafeteria-demo-csh-1`…
+// Aucun identifiant créé par l'application (`newId()` → UUID, ni `station-…`
+// des lignes reprises) ne peut y correspondre.
+
+/** Vrai si une copie (blob brut, liste de produits…) porte encore une ligne de démonstration. */
+export function containsSeedIds(v: any): boolean {
+  const found = new Set<string>();
+  collectSeedRefs(v, found);
+  return found.size > 0;
+}
 
 const isSeedRow = (x: any): boolean => !!x?.id && SEED_ID.test(x.id);
 

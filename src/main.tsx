@@ -1,4 +1,5 @@
 import { createRoot } from 'react-dom/client';
+import { purgeLegacyLocalData } from './lib/legacyCleanup';
 import App from './App.tsx';
 import './index.css';
 import './i18n';
@@ -14,6 +15,9 @@ import './i18n';
 //
 // Re-enable StrictMode only after migrating to an effect that is truly
 // idempotent under double-invoke (e.g. React Query / SWR).
+
+// Supabase is the only data source: drop any demo-era browser copies first.
+purgeLegacyLocalData();
 
 createRoot(document.getElementById('root')!).render(
   <App />

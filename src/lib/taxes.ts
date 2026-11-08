@@ -19,7 +19,33 @@ export interface TaxPreset {
   kind: TaxKind;
   value: number;
   createdAt?: string;
+  /** Modèle intégré (taxes officielles carburant NAFTAL) — non supprimable. */
+  builtin?: boolean;
 }
+
+/**
+ * ─── Taxes carburant officielles (factures NAFTAL) ──────────────────────────
+ * Relevées sur les factures carburant NAFTAL (Gas-oil & Essence sans plomb).
+ * Elles sont proposées d'office dans l'éditeur de taxes des achats ET des ventes
+ * carburant : un clic les active, la valeur reste modifiable facture par facture
+ * (les montants fixes — TPP, redevance, taxe additionnelle, écart — varient selon
+ * le volume livré).
+ *
+ *   Code 5477 — TVA sur ventes P.Pétroliers 19 %  → utilisez l'interrupteur TVA (19 %).
+ *   Code 5474 — TVA sur autres prod. & prest. 19 %
+ *   Code 70701 — TPP sur marchandise (soumise à TVA)
+ *   Code 5478 — Taxe additionnelle sur les carburants
+ *   Code 706138 — Redevance de gestion TPE
+ *   Code 6988/7988 — Écart sur prix (décrété / calculé)
+ */
+export const FUEL_TAX_PRESETS: TaxPreset[] = [
+  { id: 'fuel-tva-petroliers', name: 'TVA sur ventes P.Pétroliers', kind: 'percent', value: 19, builtin: true },
+  { id: 'fuel-tva-autres', name: 'TVA sur autres prod. & prest.', kind: 'percent', value: 19, builtin: true },
+  { id: 'fuel-tpp', name: 'TPP sur marchandise (soumise à TVA)', kind: 'amount', value: 0, builtin: true },
+  { id: 'fuel-taxe-additionnelle', name: 'Taxe additionnelle sur les carburants', kind: 'amount', value: 0, builtin: true },
+  { id: 'fuel-redevance-tpe', name: 'Redevance de gestion TPE', kind: 'amount', value: 0, builtin: true },
+  { id: 'fuel-ecart-prix', name: 'Écart sur prix (décrété / calculé)', kind: 'amount', value: 0, builtin: true },
+];
 
 /** Une taxe appliquée sur un document (copie figée du modèle). */
 export interface AppliedTax {
@@ -56,11 +82,22 @@ const mapPreset = (r: any): TaxPreset => ({
   value: +(r.value ?? 0), createdAt: r.created_at,
 });
 
+/**
+ * Renvoie les modèles de taxes : les taxes carburant officielles (NAFTAL) en
+ * tête, suivies des taxes créées par l'utilisateur. Un modèle enregistré qui
+ * reprend exactement le nom d'une taxe intégrée la remplace (valeur
+ * personnalisée), pour éviter les doublons.
+ */
 export async function loadTaxPresets(): Promise<TaxPreset[]> {
   try {
     const { data } = await supabase.from(TABLE).select('*').order('created_at', { ascending: true });
-    return ((data as any[]) || []).map(mapPreset);
-  } catch { return []; }
+    const stored = ((data as any[]) || []).map(mapPreset);
+    const storedNames = new Set(stored.map(p => p.name.trim().toLowerCase()));
+    const builtins = FUEL_TAX_PRESETS.filter(b => !storedNames.has(b.name.trim().toLowerCase()));
+    return [...builtins, ...stored];
+  } catch {
+    return [...FUEL_TAX_PRESETS];
+  }
 }
 
 export async function saveTaxPreset(p: Omit<TaxPreset, 'id'> & { id?: string }): Promise<TaxPreset> {
