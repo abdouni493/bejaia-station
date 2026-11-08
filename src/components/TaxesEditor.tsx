@@ -8,7 +8,7 @@
  *    les prochaines opérations, et l'active aussitôt.
  */
 import React, { useEffect, useState } from 'react';
-import { Plus, Receipt, Trash2, X, Check, Percent, Coins } from 'lucide-react';
+import { Plus, Receipt, Trash2, X, Check, Percent, Coins, Lock } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Switch, Field, Input, Select, StaticField, money } from './biz/Kit';
 import {
@@ -58,6 +58,7 @@ export default function TaxesEditor({
   };
 
   const removePreset = async (p: TaxPreset) => {
+    if (p.builtin) { toast.error('Taxe carburant officielle — non supprimable'); return; }
     if (!window.confirm(`Supprimer définitivement le modèle de taxe « ${p.name} » ?`)) return;
     await deleteTaxPreset(p.id);
     setPresets(prev => prev.filter(x => x.id !== p.id));
@@ -96,7 +97,7 @@ export default function TaxesEditor({
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="text-sm font-black text-slate-700 flex items-center gap-1.5"><Receipt className="w-4 h-4" /> Autres taxes</p>
-            <p className="text-xs text-slate-400">Activez une taxe enregistrée ou créez-en une nouvelle</p>
+            <p className="text-xs text-slate-400">Taxes carburant officielles (NAFTAL) intégrées — un clic pour les activer, ou créez-en une nouvelle</p>
           </div>
           <button type="button" onClick={() => setCreating(c => !c)}
             className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-black bg-violet-600 text-white hover:bg-violet-700">
@@ -114,10 +115,17 @@ export default function TaxesEditor({
                     {on ? <Check className="w-3.5 h-3.5" /> : (p.kind === 'percent' ? <Percent className="w-3 h-3" /> : <Coins className="w-3 h-3" />)}
                     {p.name} · {p.kind === 'percent' ? `${p.value}%` : money(p.value)}
                   </button>
-                  <button type="button" title="Supprimer le modèle" onClick={() => removePreset(p)}
-                    className={`pr-2 py-1.5 opacity-50 hover:opacity-100 ${on ? 'text-white' : 'text-red-500'}`}>
-                    <Trash2 className="w-3 h-3" />
-                  </button>
+                  {p.builtin ? (
+                    <span title="Taxe carburant officielle (NAFTAL) — non supprimable"
+                      className={`pr-2 py-1.5 opacity-50 ${on ? 'text-white' : 'text-slate-400'}`}>
+                      <Lock className="w-3 h-3" />
+                    </span>
+                  ) : (
+                    <button type="button" title="Supprimer le modèle" onClick={() => removePreset(p)}
+                      className={`pr-2 py-1.5 opacity-50 hover:opacity-100 ${on ? 'text-white' : 'text-red-500'}`}>
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
                 </span>
               );
             })}
